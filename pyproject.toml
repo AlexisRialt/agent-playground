@@ -15,8 +15,19 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.9.1",
     "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `tests/` imports both `app` and the root `main.py` launcher.
+pythonpath = ["."]
+# Async tests are plain `async def` — no per-test marker needed.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error"]
 
 [tool.ruff.lint]
 # We log through loguru, which uses `{}` placeholders rather than %-style ones;
