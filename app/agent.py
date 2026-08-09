@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -17,8 +18,11 @@ from anthropic.types import Message
 
 from app.config import settings
 from app.jobs import Job
-from app.logs import JobLogAdapter, job_logger, short
+from app.logs import job_logger, short
 from app.tools import filesystem, search
+
+if TYPE_CHECKING:  # loguru only exports `Logger` to type checkers, not at runtime
+    from loguru import Logger
 
 SYSTEM_PROMPT = """\
 You are an autonomous agent that completes a user's task end to end.
@@ -54,7 +58,7 @@ class _Run:
     fs: filesystem.Filesystem
     anthropic: AsyncAnthropic
     http: httpx.AsyncClient
-    log: JobLogAdapter
+    log: Logger
 
 
 async def _dispatch_tool(run: _Run, name: str, tool_input: dict) -> tuple[str, bool]:
@@ -74,7 +78,7 @@ async def _dispatch_tool(run: _Run, name: str, tool_input: dict) -> tuple[str, b
                 num_results=tool_input.get("num_results", 5),
             )
             return out, False
-        run.log.warning("tool: unknown tool %r requested", name)
+        run.log.warning("tool: unknown tool {!r} requested", name)
         return f"unknown tool '{name}'", True
     except Exception as exc:  # noqa: BLE001 - surface any tool error to the model so it can recover
         return f"{type(exc).__name__}: {exc}", True
@@ -82,7 +86,7 @@ async def _dispatch_tool(run: _Run, name: str, tool_input: dict) -> tuple[str, b
 
 async def _ask_claude(run: _Run, messages: list[dict]) -> Message:
     run.log.info(
-        "-> claude (model=%s, effort=%s, messages=%d)",
+        "-> claude (model={}, effort={}, messages={})",
         settings.model,
         settings.effort,
         len(messages),
@@ -98,7 +102,7 @@ async def _ask_claude(run: _Run, messages: list[dict]) -> Message:
         messages=messages,
     )
     run.log.info(
-        "<- claude in %.1fs (stop_reason=%s, in=%s tok, out=%s tok)",
+        "<- claude in {:.1f}s (stop_reason={}, in={} tok, out={} tok)",
         time.perf_counter() - started,
         response.stop_reason,
         response.usage.input_tokens,
@@ -106,7 +110,7 @@ async def _ask_claude(run: _Run, messages: list[dict]) -> Message:
     )
     for block in response.content:
         if block.type == "thinking":
-            run.log.debug("thinking: %s", short(block.thinking, 500))
+            run.log.debug("thinking: {}", short(block.thinking, 500))
     return response
 
 
@@ -115,7 +119,7 @@ def _record_text(run: _Run, response: Message) -> str:
     parts = [block.text for block in response.content if block.type == "text"]
     for part in parts:
         run.job.add_log(part)
-        run.log.info("text: %s", short(part, 600))
+        run.log.info("text: {}", short(part, 600))
     return "".join(parts).strip()
 
 
@@ -123,21 +127,21 @@ async def _run_tools(run: _Run, response: Message) -> list[dict]:
     """Execute every tool_use block in the response and record what happened."""
     results = []
     calls = [block for block in response.content if block.type == "tool_use"]
-    run.log.info("%d tool call(s) requested", len(calls))
+    run.log.info("{} tool call(s) requested", len(calls))
     for block in response.content:
         if block.type != "tool_use":
             continue
-        run.log.info("tool %s -> %s", block.name, short(dict(block.input), 300))
+        run.log.info("tool {} -> {}", block.name, short(dict(block.input), 300))
         started = time.perf_counter()
         output, is_error = await _dispatch_tool(run, block.name, block.input)
         elapsed = time.perf_counter() - started
         if is_error:
             run.log.warning(
-                "tool %s FAILED in %.2fs: %s", block.name, elapsed, short(output, 300)
+                "tool {} FAILED in {:.2f}s: {}", block.name, elapsed, short(output, 300)
             )
         else:
             run.log.info(
-                "tool %s ok in %.2fs: %s", block.name, elapsed, short(output, 300)
+                "tool {} ok in {:.2f}s: {}", block.name, elapsed, short(output, 300)
             )
         run.job.add_tool_call(block.name, dict(block.input), output, is_error)
         results.append(
@@ -158,19 +162,19 @@ async def run_agent(
     http_client: httpx.AsyncClient,
 ) -> str:
     """Drive the agent to completion and return the final text answer."""
-    log = job_logger(__name__, job.id)
+    log = job_logger(job.id)
     run = _Run(job=job, fs=fs, anthropic=anthropic_client, http=http_client, log=log)
     messages: list[dict] = [{"role": "user", "content": job.task}]
-    log.info("agent starting (workspace=%s, task=%s)", fs.root, short(job.task, 200))
+    log.info("agent starting (workspace={}, task={})", fs.root, short(job.task, 200))
 
     for iteration in range(1, settings.max_iterations + 1):
-        log.info("--- iteration %d/%d ---", iteration, settings.max_iterations)
+        log.info("--- iteration {}/{} ---", iteration, settings.max_iterations)
         response = await _ask_claude(run, messages)
         text = _record_text(run, response)
 
         match response.stop_reason:
             case "end_turn":
-                log.info("agent finished after %d iteration(s)", iteration)
+                log.info("agent finished after {} iteration(s)", iteration)
                 return text
 
             # Server-side loop paused; re-send the turn so far to let it resume.
@@ -191,10 +195,10 @@ async def run_agent(
                 raise RuntimeError("the model declined to complete this task (refusal)")
 
             case other:
-                log.error("unexpected stop_reason: %s", other)
+                log.error("unexpected stop_reason: {}", other)
                 raise RuntimeError(f"unexpected stop_reason: {other}")
 
-    log.error("iteration budget exhausted (%d)", settings.max_iterations)
+    log.error("iteration budget exhausted ({})", settings.max_iterations)
     raise RuntimeError(
         f"agent did not finish within {settings.max_iterations} iterations"
     )

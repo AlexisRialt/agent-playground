@@ -9,9 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.logs import get_logger
-
-log = get_logger(__name__)
+from loguru import logger as log
 
 # Anthropic tool definition. One tool, three commands — see CLAUDE spec: "the file system".
 TOOL_DEFINITION = {
@@ -56,12 +54,12 @@ class Filesystem:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        log.debug("workspace ready: %s", self.root)
+        log.debug("workspace ready: {}", self.root)
 
     def _resolve(self, rel_path: str) -> Path:
         target = (self.root / rel_path).resolve()
         if target != self.root and self.root not in target.parents:
-            log.warning("blocked sandbox escape: %r (root=%s)", rel_path, self.root)
+            log.warning("blocked sandbox escape: {!r} (root={})", rel_path, self.root)
             raise ValueError(f"path '{rel_path}' escapes the workspace sandbox")
         return target
 
@@ -71,7 +69,7 @@ class Filesystem:
         Raises ValueError / OSError on bad input; the caller turns those into an
         is_error tool result so the agent can recover.
         """
-        log.debug("fs %s %r (root=%s)", command, path, self.root)
+        log.debug("fs {} {!r} (root={})", command, path, self.root)
         if command == "list":
             return self._list(path)
         if command == "read":
@@ -115,5 +113,5 @@ class Filesystem:
         target = self._resolve(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-        log.info("fs wrote %d chars -> %s", len(content), target)
+        log.info("fs wrote {} chars -> {}", len(content), target)
         return f"wrote {len(content)} characters to {path}"

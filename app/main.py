@@ -15,16 +15,16 @@ from contextlib import asynccontextmanager
 import httpx
 from anthropic import AsyncAnthropic
 from fastapi import FastAPI, HTTPException
+from loguru import logger as log
 from pydantic import BaseModel, Field
 
 from app.agent import run_agent
 from app.config import settings
 from app.jobs import Job, JobStatus, JobStore
-from app.logs import get_logger, job_logger, setup_logging, short
+from app.logs import job_logger, setup_logging, short
 from app.tools.filesystem import Filesystem
 
 setup_logging(settings.log_level)
-log = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI):
     app.state.tasks = set()  # keep strong refs so background tasks aren't GC'd
     settings.workspace_root.mkdir(parents=True, exist_ok=True)
     log.info(
-        "startup: model=%s effort=%s max_iterations=%d max_tokens=%d workspace=%s search=%s",
+        "startup: model={} effort={} max_iterations={} max_tokens={} workspace={} search={}",
         settings.model,
         settings.effort,
         settings.max_iterations,
@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         log.info(
-            "shutdown: closing clients (%d job task(s) in flight)", len(app.state.tasks)
+            "shutdown: closing clients ({} job task(s) in flight)", len(app.state.tasks)
         )
         await app.state.http.aclose()
         await app.state.anthropic.close()
@@ -69,18 +69,18 @@ class CreateJobResponse(BaseModel):
 
 
 async def _execute_job(app: FastAPI, job: Job) -> None:
-    jlog = job_logger(__name__, job.id)
+    jlog = job_logger(job.id)
     job.status = JobStatus.RUNNING
     job.touch()
     fs = Filesystem(settings.workspace_root / job.id)
-    jlog.info("job running (workspace=%s)", fs.root)
+    jlog.info("job running (workspace={})", fs.root)
     started = time.perf_counter()
     try:
         result = await run_agent(job, fs, app.state.anthropic, app.state.http)
         job.result = result
         job.status = JobStatus.COMPLETED
         jlog.info(
-            "job completed in %.1fs after %d tool call(s): %s",
+            "job completed in {:.1f}s after {} tool call(s): {}",
             time.perf_counter() - started,
             len(job.tool_calls),
             short(result, 600),
@@ -88,7 +88,7 @@ async def _execute_job(app: FastAPI, job: Job) -> None:
     except Exception as exc:  # noqa: BLE001 - job boundary: record any failure as job state
         job.error = f"{type(exc).__name__}: {exc}"
         job.status = JobStatus.FAILED
-        jlog.exception("job FAILED after %.1fs", time.perf_counter() - started)
+        jlog.exception("job FAILED after {:.1f}s", time.perf_counter() - started)
     finally:
         job.touch()
 
@@ -96,7 +96,7 @@ async def _execute_job(app: FastAPI, job: Job) -> None:
 @app.post("/jobs", response_model=CreateJobResponse, status_code=202)
 async def create_job(req: CreateJobRequest) -> CreateJobResponse:
     job = app.state.jobs.create(req.text)
-    job_logger(__name__, job.id).info("job created: %s", short(req.text, 300))
+    job_logger(job.id).info("job created: {}", short(req.text, 300))
     task = asyncio.create_task(_execute_job(app, job))
     # Track the task so it isn't garbage-collected mid-run; drop it when done.
     app.state.tasks.add(task)
@@ -108,9 +108,9 @@ async def create_job(req: CreateJobRequest) -> CreateJobResponse:
 async def get_job(job_id: str) -> dict:
     job = app.state.jobs.get(job_id)
     if job is None:
-        log.warning("poll for unknown job %s", job_id)
+        log.warning("poll for unknown job {}", job_id)
         raise HTTPException(status_code=404, detail="job not found")
-    log.debug("poll job %s -> %s", job_id[:8], job.status.value)
+    log.debug("poll job {} -> {}", job_id[:8], job.status.value)
     return job.to_dict()
 
 

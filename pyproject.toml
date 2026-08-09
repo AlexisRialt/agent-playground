@@ -8,6 +8,7 @@ dependencies = [
     "anthropic>=0.120.2",
     "fastapi>=0.141.1",
     "httpx>=0.28.1",
+    "loguru>=0.7.3",
     "ruff>=0.16.1",
     "uvicorn[standard]>=0.52.1",
 ]
@@ -16,3 +17,8 @@ dependencies = [
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.ruff.lint]
+# We log through loguru, which uses `{}` placeholders rather than %-style ones;
+# the stdlib-logging format checks misread those as too many arguments.
+ignore = ["PLE1205"]

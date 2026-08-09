@@ -8,11 +8,9 @@ you can drop in a real key later without touching any other code.
 from __future__ import annotations
 
 import httpx
+from loguru import logger as log
 
 from app.config import settings
-from app.logs import get_logger
-
-log = get_logger(__name__)
 
 TOOL_DEFINITION = {
     "name": "google_search",
@@ -48,7 +46,7 @@ async def google_search(
 ) -> str:
     """Run a Google search via SerpAPI. Returns formatted results as text."""
     num_results = max(1, min(int(num_results), 10))
-    log.info("search %r (num_results=%d)", query, num_results)
+    log.info("search {!r} (num_results={})", query, num_results)
 
     if not settings.serper_api_key:
         log.warning("search skipped: SERPER_API_KEY is not set")
@@ -73,11 +71,11 @@ async def google_search(
 
     # SerpAPI reports quota/param problems as a 200 with an "error" field.
     if error := data.get("error"):
-        log.warning("search error for %r: %s", query, error)
+        log.warning("search error for {!r}: {}", query, error)
         return f"google_search failed for {query!r}: {error}"
 
     organic = data.get("organic_results", [])[:num_results]
-    log.info("search %r -> %d result(s)", query, len(organic))
+    log.info("search {!r} -> {} result(s)", query, len(organic))
     if not organic:
         return f"No results found for {query!r}."
 
