@@ -52,3 +52,18 @@ class Job:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> Job:
+        """Rebuild a job from its `to_dict()` shape (i.e. from a stored row)."""
+        return cls(
+            id=payload["id"],
+            status=JobStatus(payload["status"]),
+            task=payload["task"],
+            log=list(payload["log"] or []),
+            tool_calls=[ToolCall(**tc) for tc in payload["tool_calls"] or []],
+            result=payload["result"],
+            error=payload["error"],
+            created_at=payload["created_at"],
+            updated_at=payload["updated_at"],
+        )

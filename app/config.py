@@ -22,6 +22,9 @@ class Settings:
     workspace_root: Path  # each job gets an isolated workspace/<job_id> sandbox
     serper_api_key: str | None  # SerpAPI key; absent -> google_search returns a stub
     log_level: str  # DEBUG surfaces the agent's thinking and full tool payloads
+    database_url: str  # postgres DSN the job store persists to
+    host: str  # bind address; 0.0.0.0 inside a container
+    port: int
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -33,6 +36,12 @@ class Settings:
             workspace_root=Path(os.getenv("AGENT_WORKSPACE", "workspace")).resolve(),
             serper_api_key=os.getenv("SERPER_API_KEY"),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
+            database_url=os.getenv(
+                "DATABASE_URL",
+                "postgresql://agent:agent@localhost:5432/agent",
+            ),
+            host=os.getenv("HOST", "127.0.0.1"),
+            port=int(os.getenv("PORT", "8000")),
         )
 
 

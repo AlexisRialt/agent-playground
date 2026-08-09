@@ -9,6 +9,7 @@ plan step and tool call can be recorded into the Job record for status reporting
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -49,6 +50,13 @@ proceed without asking. Ground any progress claims in actual tool results.
 # The two tools, exactly as specified.
 TOOLS = [filesystem.TOOL_DEFINITION, search.TOOL_DEFINITION]
 
+# Called after each iteration so the caller can persist partial progress.
+OnProgress = Callable[[], Awaitable[None]]
+
+
+async def _no_progress() -> None:
+    """Default `on_progress`: keep whatever the job accumulated in memory only."""
+
 
 @dataclass(frozen=True, slots=True)
 class _Run:
@@ -59,6 +67,7 @@ class _Run:
     anthropic: AsyncAnthropic
     http: httpx.AsyncClient
     log: Logger
+    on_progress: OnProgress
 
 
 async def _dispatch_tool(run: _Run, name: str, tool_input: dict) -> tuple[str, bool]:
@@ -160,10 +169,23 @@ async def run_agent(
     fs: filesystem.Filesystem,
     anthropic_client: AsyncAnthropic,
     http_client: httpx.AsyncClient,
+    on_progress: OnProgress | None = None,
 ) -> str:
-    """Drive the agent to completion and return the final text answer."""
+    """Drive the agent to completion and return the final text answer.
+
+    `on_progress` is awaited once per iteration, after the job record has been
+    updated with that iteration's narration and tool calls — the runner uses it
+    to flush partial progress to the database.
+    """
     log = job_logger(job.id)
-    run = _Run(job=job, fs=fs, anthropic=anthropic_client, http=http_client, log=log)
+    run = _Run(
+        job=job,
+        fs=fs,
+        anthropic=anthropic_client,
+        http=http_client,
+        log=log,
+        on_progress=on_progress or _no_progress,
+    )
     messages: list[dict] = [{"role": "user", "content": job.task}]
     log.info("agent starting (workspace={}, task={})", fs.root, short(job.task, 200))
 
@@ -181,6 +203,7 @@ async def run_agent(
             case "pause_turn":
                 log.info("turn paused server-side; resuming")
                 messages.append({"role": "assistant", "content": response.content})
+                await run.on_progress()
 
             case "tool_use":
                 # Echo back the full assistant content (incl. thinking + tool_use
@@ -189,6 +212,7 @@ async def run_agent(
                 messages.append(
                     {"role": "user", "content": await _run_tools(run, response)}
                 )
+                await run.on_progress()
 
             case "refusal":
                 log.error("model refused the task")

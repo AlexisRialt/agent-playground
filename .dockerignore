@@ -1,0 +1,36 @@
+# Everything the image doesn't need. Keep this tight: the build context is
+# uploaded to the daemon on every `docker build`.
+.git/
+.gitignore
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Local tooling / IDE
+.idea/
+.claude/
+.mcp.json
+.envrc
+.python-version
+
+# Caches and test artefacts
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Runtime output — the container gets its own volume at /data/workspace
+workspace/
+
+# Docs and container config (not needed inside the image)
+README.md
+CLAUDE.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Tests are not shipped in the runtime image
+tests/

@@ -1,4 +1,8 @@
-"""Job records: `Job`, `JobStatus`, `ToolCall`, `JobStore`, `now_iso`."""
+"""Job records: `Job`, `JobStatus`, `ToolCall`, `InMemoryJobStore`, `now_iso`.
+
+`PostgresJobStore` — the store the server actually runs on — has its own file,
+`test_postgres_store.py`.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.jobs import Job, JobStatus, JobStore, ToolCall
+from app.jobs import InMemoryJobStore, Job, JobStatus, JobStore, ToolCall
 from app.jobs.timestamps import now_iso
 
 # A timestamp that is unambiguously older than anything `now_iso()` produces.
@@ -210,51 +214,133 @@ def test_to_dict_snapshots_tool_calls_as_plain_dicts():
 
 
 # --------------------------------------------------------------------------
-# JobStore
+# Job.from_dict — the inverse of to_dict, used to rebuild a stored row
 # --------------------------------------------------------------------------
 
 
-def test_store_create_returns_a_pending_job_and_keeps_it():
-    store = JobStore()
-    job = store.create("write a haiku")
+def test_from_dict_round_trips_a_full_job():
+    original = Job(task="t")
+    original.add_log("PLAN: do the thing")
+    original.add_tool_call("google_search", {"query": "q"}, "1. hit", False)
+    original.status = JobStatus.COMPLETED
+    original.result = "answer"
+
+    assert Job.from_dict(original.to_dict()).to_dict() == original.to_dict()
+
+
+def test_from_dict_restores_typed_fields():
+    job = Job.from_dict(
+        {
+            "id": "abc",
+            "status": "failed",
+            "task": "t",
+            "log": ["a"],
+            "tool_calls": [
+                {
+                    "tool": "filesystem",
+                    "input": {"command": "list"},
+                    "output": "out",
+                    "is_error": True,
+                    "at": OLD,
+                }
+            ],
+            "result": None,
+            "error": "RuntimeError: boom",
+            "created_at": OLD,
+            "updated_at": OLD,
+        }
+    )
+
+    assert job.status is JobStatus.FAILED  # the enum, not the raw string
+    assert isinstance(job.tool_calls[0], ToolCall)
+    assert job.tool_calls[0].is_error is True
+    assert job.error == "RuntimeError: boom"
+
+
+def test_from_dict_tolerates_null_json_columns():
+    """An older row could have NULL where the app now writes `[]`."""
+    payload = Job(task="t").to_dict() | {"log": None, "tool_calls": None}
+    job = Job.from_dict(payload)
+    assert job.log == []
+    assert job.tool_calls == []
+
+
+def test_from_dict_copies_the_mutable_fields():
+    payload = Job(task="t").to_dict()
+    job = Job.from_dict(payload)
+    job.add_log("later")
+    assert payload["log"] == []
+
+
+# --------------------------------------------------------------------------
+# InMemoryJobStore
+# --------------------------------------------------------------------------
+
+
+def test_in_memory_store_is_a_job_store():
+    assert isinstance(InMemoryJobStore(), JobStore)
+
+
+def test_job_store_cannot_be_instantiated_directly():
+    with pytest.raises(TypeError):
+        JobStore()
+
+
+async def test_store_create_returns_a_pending_job_and_keeps_it():
+    store = InMemoryJobStore()
+    job = await store.create("write a haiku")
     assert job.task == "write a haiku"
     assert job.status is JobStatus.PENDING
-    assert store.get(job.id) is job
+    assert await store.get(job.id) is job
 
 
-def test_store_get_unknown_id_returns_none():
-    assert JobStore().get("nope") is None
+async def test_store_get_unknown_id_returns_none():
+    assert await InMemoryJobStore().get("nope") is None
 
 
-def test_store_starts_empty():
-    assert JobStore().list() == []
+async def test_store_starts_empty():
+    assert await InMemoryJobStore().list() == []
 
 
-def test_store_list_preserves_insertion_order():
-    store = JobStore()
-    jobs = [store.create(f"task {i}") for i in range(3)]
-    assert store.list() == jobs
+async def test_store_list_preserves_insertion_order():
+    store = InMemoryJobStore()
+    jobs = [await store.create(f"task {i}") for i in range(3)]
+    assert await store.list() == jobs
 
 
-def test_store_list_returns_a_copy():
-    store = JobStore()
-    store.create("a")
-    listing = store.list()
+async def test_store_list_returns_a_copy():
+    store = InMemoryJobStore()
+    await store.create("a")
+    listing = await store.list()
     listing.clear()
-    assert len(store.list()) == 1
+    assert len(await store.list()) == 1
 
 
-def test_stores_do_not_share_state():
-    a, b = JobStore(), JobStore()
-    job = a.create("only in a")
-    assert b.get(job.id) is None
-    assert b.list() == []
+async def test_stores_do_not_share_state():
+    a, b = InMemoryJobStore(), InMemoryJobStore()
+    job = await a.create("only in a")
+    assert await b.get(job.id) is None
+    assert await b.list() == []
 
 
-def test_store_holds_live_references():
+async def test_store_holds_live_references():
     """Mutations made by the background runner are visible to later polls."""
-    store = JobStore()
-    job = store.create("t")
+    store = InMemoryJobStore()
+    job = await store.create("t")
     job.status = JobStatus.COMPLETED
     job.result = "done"
-    assert store.get(job.id).result == "done"
+    assert (await store.get(job.id)).result == "done"
+
+
+async def test_store_save_registers_an_unknown_job():
+    store = InMemoryJobStore()
+    job = Job(task="made elsewhere")
+    await store.save(job)
+    assert await store.get(job.id) is job
+
+
+async def test_store_close_is_a_no_op():
+    store = InMemoryJobStore()
+    job = await store.create("t")
+    await store.close()
+    assert await store.get(job.id) is job

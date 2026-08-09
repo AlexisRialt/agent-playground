@@ -33,9 +33,11 @@ class CreateJobResponse(BaseModel):
 @router.post("/jobs", response_model=CreateJobResponse, status_code=202)
 async def create_job(req: CreateJobRequest, request: Request) -> CreateJobResponse:
     state = request.app.state
-    job = state.jobs.create(req.text)
+    job = await state.jobs.create(req.text)
     job_logger(job.id).info("job created: {}", short(req.text, 300))
-    task = asyncio.create_task(execute_job(job, state.anthropic, state.http))
+    task = asyncio.create_task(
+        execute_job(job, state.anthropic, state.http, state.jobs)
+    )
     # Track the task so it isn't garbage-collected mid-run; drop it when done.
     state.tasks.add(task)
     task.add_done_callback(state.tasks.discard)
@@ -44,7 +46,7 @@ async def create_job(req: CreateJobRequest, request: Request) -> CreateJobRespon
 
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str, request: Request) -> dict:
-    job = request.app.state.jobs.get(job_id)
+    job = await request.app.state.jobs.get(job_id)
     if job is None:
         log.warning("poll for unknown job {}", job_id)
         raise HTTPException(status_code=404, detail="job not found")
@@ -54,6 +56,7 @@ async def get_job(job_id: str, request: Request) -> dict:
 
 @router.get("/jobs")
 async def list_jobs(request: Request) -> list[dict]:
+    jobs = await request.app.state.jobs.list()
     return [
         {
             "id": j.id,
@@ -62,5 +65,5 @@ async def list_jobs(request: Request) -> list[dict]:
             "created_at": j.created_at,
             "updated_at": j.updated_at,
         }
-        for j in request.app.state.jobs.list()
+        for j in jobs
     ]

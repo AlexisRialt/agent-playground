@@ -16,10 +16,20 @@ from loguru import logger as log
 
 from app.api import health_router, jobs_router
 from app.config import settings
-from app.jobs import JobStore
+from app.db import create_pool
+from app.jobs import JobStore, PostgresJobStore
 from app.logs import setup_logging
 
 setup_logging(settings.log_level)
+
+
+async def open_job_store() -> JobStore:
+    """Connect the durable job store.
+
+    Split out of the lifespan so the tests can swap in `InMemoryJobStore` and
+    stay off the network.
+    """
+    return PostgresJobStore(await create_pool(settings.database_url))
 
 
 @asynccontextmanager
@@ -27,7 +37,7 @@ async def lifespan(app: FastAPI):
     # Shared clients live for the process lifetime.
     app.state.anthropic = AsyncAnthropic()  # reads ANTHROPIC_API_KEY from env
     app.state.http = httpx.AsyncClient()
-    app.state.jobs = JobStore()
+    app.state.jobs = await open_job_store()
     app.state.tasks = set()  # keep strong refs so background tasks aren't GC'd
     settings.workspace_root.mkdir(parents=True, exist_ok=True)
     log.info(
@@ -47,6 +57,7 @@ async def lifespan(app: FastAPI):
         )
         await app.state.http.aclose()
         await app.state.anthropic.close()
+        await app.state.jobs.close()
 
 
 app = FastAPI(title="agent-playground", version="0.1.0", lifespan=lifespan)

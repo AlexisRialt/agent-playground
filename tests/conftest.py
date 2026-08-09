@@ -7,6 +7,7 @@ httpx client is wired to a `MockTransport`.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from typing import Any
 
@@ -15,7 +16,7 @@ import pytest
 from anthropic.types import Message
 
 from app.config import settings as real_settings
-from app.jobs import Job
+from app.jobs import InMemoryJobStore, Job
 from app.tools.filesystem import Filesystem
 
 # --------------------------------------------------------------------------
@@ -133,13 +134,61 @@ async def http_client():
 
 
 # --------------------------------------------------------------------------
+# Postgres
+# --------------------------------------------------------------------------
+
+
+class FakePool:
+    """Stands in for an `asyncpg.Pool`: records SQL, replays canned rows.
+
+    Enough to exercise `PostgresJobStore`'s row mapping without a database.
+    """
+
+    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
+        self.rows = list(rows or [])
+        self.executed: list[tuple[str, tuple[Any, ...]]] = []
+        self.closed = False
+
+    async def execute(self, sql: str, *args: Any) -> None:
+        self.executed.append((sql, args))
+
+    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
+        self.executed.append((sql, args))
+        job_id = args[0]
+        return next((row for row in self.rows if row["id"] == job_id), None)
+
+    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+        self.executed.append((sql, args))
+        return list(self.rows)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+# --------------------------------------------------------------------------
 # Domain fixtures
 # --------------------------------------------------------------------------
+
+
+def run_sync(coro):
+    """Await a coroutine from a synchronous test.
+
+    The store API is async, but the endpoint tests drive the app through
+    `TestClient` (which runs the event loop on its own thread), so the test body
+    itself has no loop to await on. Safe here because the in-memory store holds
+    nothing loop-bound.
+    """
+    return asyncio.run(coro)
 
 
 @pytest.fixture
 def job() -> Job:
     return Job(task="summarise the news")
+
+
+@pytest.fixture
+def store() -> InMemoryJobStore:
+    return InMemoryJobStore()
 
 
 @pytest.fixture

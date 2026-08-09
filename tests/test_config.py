@@ -17,6 +17,9 @@ ENV_VARS = [
     "AGENT_WORKSPACE",
     "SERPER_API_KEY",
     "LOG_LEVEL",
+    "DATABASE_URL",
+    "HOST",
+    "PORT",
 ]
 
 
@@ -36,6 +39,9 @@ def test_defaults(clean_env):
     assert s.workspace_root == Path("workspace").resolve()
     assert s.serper_api_key is None
     assert s.log_level == "INFO"
+    assert s.database_url == "postgresql://agent:agent@localhost:5432/agent"
+    assert s.host == "127.0.0.1"
+    assert s.port == 8000
 
 
 def test_every_value_comes_from_the_environment(clean_env, tmp_path):
@@ -46,6 +52,9 @@ def test_every_value_comes_from_the_environment(clean_env, tmp_path):
     clean_env.setenv("AGENT_WORKSPACE", str(tmp_path / "ws"))
     clean_env.setenv("SERPER_API_KEY", "sk-serp")
     clean_env.setenv("LOG_LEVEL", "DEBUG")
+    clean_env.setenv("DATABASE_URL", "postgresql://u:p@db:5432/jobs")
+    clean_env.setenv("HOST", "0.0.0.0")
+    clean_env.setenv("PORT", "9000")
 
     s = Settings.from_env()
 
@@ -56,6 +65,9 @@ def test_every_value_comes_from_the_environment(clean_env, tmp_path):
     assert s.workspace_root == tmp_path / "ws"
     assert s.serper_api_key == "sk-serp"
     assert s.log_level == "DEBUG"
+    assert s.database_url == "postgresql://u:p@db:5432/jobs"
+    assert s.host == "0.0.0.0"
+    assert s.port == 9000
 
 
 def test_workspace_root_is_absolute_even_when_relative(clean_env):
@@ -70,7 +82,7 @@ def test_workspace_root_normalises_traversal(clean_env, tmp_path):
     assert Settings.from_env().workspace_root == tmp_path / "b"
 
 
-@pytest.mark.parametrize("var", ["AGENT_MAX_ITERATIONS", "AGENT_MAX_TOKENS"])
+@pytest.mark.parametrize("var", ["AGENT_MAX_ITERATIONS", "AGENT_MAX_TOKENS", "PORT"])
 def test_non_numeric_int_settings_fail_loudly(clean_env, var):
     clean_env.setenv(var, "not-a-number")
     with pytest.raises(ValueError):

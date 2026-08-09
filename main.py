@@ -11,8 +11,9 @@ def main() -> None:
     setup_logging(settings.log_level)
     uvicorn.run(
         "app.main:app",
-        host="127.0.0.1",
-        port=8000,
+        # 127.0.0.1 locally; HOST=0.0.0.0 in the container so the port maps out.
+        host=settings.host,
+        port=settings.port,
         reload=False,
         log_level=settings.log_level.lower(),
         # Don't let uvicorn install its own handlers — its loggers propagate to

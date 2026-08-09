@@ -6,7 +6,14 @@ import httpx
 import pytest
 
 from app import agent
-from app.agent import SYSTEM_PROMPT, TOOLS, _dispatch_tool, _Run, run_agent
+from app.agent import (
+    SYSTEM_PROMPT,
+    TOOLS,
+    _dispatch_tool,
+    _no_progress,
+    _Run,
+    run_agent,
+)
 from app.logs import job_logger
 from app.tools import filesystem, search
 from tests.conftest import (
@@ -23,13 +30,18 @@ from tests.conftest import (
 @pytest.fixture
 def run(job, fs, http_client):
     """A `_Run` with a real sandbox, a stubbed HTTP client, and no Claude client."""
+    return make_run(job, fs, None, http_client)
+
+
+def make_run(job, fs, anthropic, http, on_progress=_no_progress) -> _Run:
     return _Run(
-        job=job, fs=fs, anthropic=None, http=http_client, log=job_logger(job.id)
+        job=job,
+        fs=fs,
+        anthropic=anthropic,
+        http=http,
+        log=job_logger(job.id),
+        on_progress=on_progress,
     )
-
-
-def make_run(job, fs, anthropic, http) -> _Run:
-    return _Run(job=job, fs=fs, anthropic=anthropic, http=http, log=job_logger(job.id))
 
 
 # --------------------------------------------------------------------------
@@ -469,3 +481,83 @@ async def test_search_results_flow_back_into_the_job_record(job, fs, patch_setti
     assert job.tool_calls[0].tool == "google_search"
     assert "uv docs" in job.tool_calls[0].output
     assert job.tool_calls[0].is_error is False
+
+
+# --------------------------------------------------------------------------
+# on_progress — how the runner persists partial progress
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def progress(job):
+    """Snapshots the job each time the loop reports progress."""
+    seen = []
+
+    async def _on_progress():
+        seen.append((list(job.log), len(job.tool_calls)))
+
+    _on_progress.seen = seen
+    return _on_progress
+
+
+async def test_on_progress_is_optional(job, fs, http_client):
+    client = FakeAnthropic(make_message([text_block("done")], "end_turn"))
+    assert await run_agent(job, fs, client, http_client) == "done"
+
+
+async def test_on_progress_fires_after_each_tool_use_iteration(
+    job, fs, http_client, progress
+):
+    client = FakeAnthropic(
+        make_message(
+            [
+                text_block("PLAN: list, then answer"),
+                tool_use_block("filesystem", {"command": "list", "path": "."}, "t1"),
+            ],
+            "tool_use",
+        ),
+        make_message([text_block("nothing there")], "end_turn"),
+    )
+
+    await run_agent(job, fs, client, http_client, progress)
+
+    # One checkpoint, taken once the tool call had been recorded.
+    assert progress.seen == [(["PLAN: list, then answer"], 1)]
+
+
+async def test_on_progress_fires_on_a_paused_turn(job, fs, http_client, progress):
+    client = FakeAnthropic(
+        make_message([text_block("still working")], "pause_turn"),
+        make_message([text_block("done")], "end_turn"),
+    )
+
+    await run_agent(job, fs, client, http_client, progress)
+
+    assert progress.seen == [(["still working"], 0)]
+
+
+async def test_on_progress_does_not_fire_on_the_final_turn(
+    job, fs, http_client, progress
+):
+    """The runner saves the finished job itself; no need to double-write."""
+    client = FakeAnthropic(make_message([text_block("done")], "end_turn"))
+
+    await run_agent(job, fs, client, http_client, progress)
+
+    assert progress.seen == []
+
+
+async def test_a_failing_checkpoint_stops_the_run(job, fs, http_client):
+    async def broken():
+        raise RuntimeError("postgres is down")
+
+    client = FakeAnthropic(
+        make_message(
+            [tool_use_block("filesystem", {"command": "list", "path": "."}, "t1")],
+            "tool_use",
+        ),
+        make_message([text_block("done")], "end_turn"),
+    )
+
+    with pytest.raises(RuntimeError, match="postgres is down"):
+        await run_agent(job, fs, client, http_client, broken)

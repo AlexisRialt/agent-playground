@@ -15,7 +15,8 @@ from fastapi.testclient import TestClient
 
 from app import main as app_main
 from app.api import jobs as jobs_api
-from app.jobs import JobStatus
+from app.jobs import InMemoryJobStore, JobStatus
+from tests.conftest import run_sync
 
 
 @pytest.fixture
@@ -25,19 +26,35 @@ def executed():
 
 
 @pytest.fixture
-def client(monkeypatch, tmp_path, patch_settings, executed):
+def in_memory_store(monkeypatch):
+    """Keep the app off Postgres: the lifespan opens an in-memory store."""
+
+    async def open_in_memory_store():
+        return InMemoryJobStore()
+
+    monkeypatch.setattr(app_main, "open_job_store", open_in_memory_store)
+
+
+@pytest.fixture
+def client(monkeypatch, tmp_path, patch_settings, executed, in_memory_store):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     patch_settings("app.main", workspace_root=tmp_path / "workspace")
 
-    async def stub_execute_job(job, anthropic_client, http_client):
+    async def stub_execute_job(job, anthropic_client, http_client, store):
         executed.append(job)
         job.status = JobStatus.COMPLETED
         job.result = f"handled: {job.task}"
+        await store.save(job)
 
     monkeypatch.setattr(jobs_api, "execute_job", stub_execute_job)
 
     with TestClient(app_main.app) as test_client:
         yield test_client
+
+
+def stored(job_id):
+    """Read a job straight out of the running app's store."""
+    return run_sync(app_main.app.state.jobs.get(job_id))
 
 
 def wait_for(predicate, timeout: float = 5.0) -> None:
@@ -78,9 +95,9 @@ def test_create_job_returns_202_with_an_id_and_pending_status(client):
 
 def test_create_job_stores_the_job(client):
     job_id = client.post("/jobs", json={"text": "a task"}).json()["id"]
-    stored = app_main.app.state.jobs.get(job_id)
-    assert stored is not None
-    assert stored.task == "a task"
+    job = stored(job_id)
+    assert job is not None
+    assert job.task == "a task"
 
 
 def test_create_job_schedules_the_background_runner(client, executed):
@@ -162,9 +179,10 @@ def test_get_job_returns_the_full_record(client):
 
 def test_get_job_exposes_recorded_tool_calls(client):
     job_id = client.post("/jobs", json={"text": "t"}).json()["id"]
-    job = app_main.app.state.jobs.get(job_id)
+    job = stored(job_id)
     job.add_log("PLAN: search then write")
     job.add_tool_call("google_search", {"query": "q"}, "1. result", False)
+    run_sync(app_main.app.state.jobs.save(job))
 
     body = client.get(f"/jobs/{job_id}").json()
 
@@ -190,10 +208,11 @@ def test_a_failed_job_reports_its_error(client):
     job_id = client.post("/jobs", json={"text": "t"}).json()["id"]
     # Let the stubbed runner finish first, so it can't overwrite the state below.
     wait_for(lambda: not app_main.app.state.tasks)
-    job = app_main.app.state.jobs.get(job_id)
+    job = stored(job_id)
     job.status = JobStatus.FAILED
     job.error = "RuntimeError: boom"
     job.result = None
+    run_sync(app_main.app.state.jobs.save(job))
 
     body = client.get(f"/jobs/{job_id}").json()
     assert body["status"] == "failed"
@@ -240,19 +259,20 @@ def test_the_store_is_per_app_instance(client):
 
 
 def test_an_in_flight_task_is_held_by_a_strong_reference(
-    monkeypatch, tmp_path, patch_settings
+    monkeypatch, tmp_path, patch_settings, in_memory_store
 ):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     patch_settings("app.main", workspace_root=tmp_path / "workspace")
     started, release = threading.Event(), threading.Event()
 
-    async def blocking_execute_job(job, anthropic_client, http_client):
+    async def blocking_execute_job(job, anthropic_client, http_client, store):
         import asyncio
 
         started.set()
         while not release.is_set():
             await asyncio.sleep(0.01)
         job.status = JobStatus.COMPLETED
+        await store.save(job)
 
     monkeypatch.setattr(jobs_api, "execute_job", blocking_execute_job)
 
@@ -268,12 +288,12 @@ def test_an_in_flight_task_is_held_by_a_strong_reference(
 
 
 def test_a_crashing_background_task_does_not_break_the_server(
-    monkeypatch, tmp_path, patch_settings
+    monkeypatch, tmp_path, patch_settings, in_memory_store
 ):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     patch_settings("app.main", workspace_root=tmp_path / "workspace")
 
-    async def exploding_execute_job(job, anthropic_client, http_client):
+    async def exploding_execute_job(job, anthropic_client, http_client, store):
         raise RuntimeError("runner blew up")
 
     monkeypatch.setattr(jobs_api, "execute_job", exploding_execute_job)

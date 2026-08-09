@@ -9,11 +9,26 @@ from fastapi.testclient import TestClient
 
 import main as launcher
 from app import main as app_main
-from app.jobs import JobStore
+from app.jobs import InMemoryJobStore, JobStore, PostgresJobStore
+from tests.conftest import run_sync
 
 
 @pytest.fixture
-def started_app(monkeypatch, tmp_path, patch_settings):
+def in_memory_store(monkeypatch):
+    """Keep the app off Postgres: the lifespan opens an in-memory store."""
+    opened: list[InMemoryJobStore] = []
+
+    async def open_in_memory_store():
+        store = InMemoryJobStore()
+        opened.append(store)
+        return store
+
+    monkeypatch.setattr(app_main, "open_job_store", open_in_memory_store)
+    return opened
+
+
+@pytest.fixture
+def started_app(monkeypatch, tmp_path, patch_settings, in_memory_store):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     settings = patch_settings("app.main", workspace_root=tmp_path / "workspace")
     with TestClient(app_main.app):
@@ -62,7 +77,7 @@ def test_lifespan_creates_the_workspace_root(started_app):
 
 
 def test_lifespan_tolerates_an_existing_workspace_root(
-    monkeypatch, tmp_path, patch_settings
+    monkeypatch, tmp_path, patch_settings, in_memory_store
 ):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     root = tmp_path / "workspace"
@@ -76,7 +91,9 @@ def test_lifespan_tolerates_an_existing_workspace_root(
     assert (root / "leftover").is_dir()
 
 
-def test_shutdown_closes_the_http_client(monkeypatch, tmp_path, patch_settings):
+def test_shutdown_closes_the_http_client(
+    monkeypatch, tmp_path, patch_settings, in_memory_store
+):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     patch_settings("app.main", workspace_root=tmp_path / "workspace")
 
@@ -87,18 +104,66 @@ def test_shutdown_closes_the_http_client(monkeypatch, tmp_path, patch_settings):
     assert client.is_closed
 
 
-def test_each_startup_gets_a_fresh_job_store(monkeypatch, tmp_path, patch_settings):
+def test_shutdown_closes_the_job_store(
+    monkeypatch, tmp_path, patch_settings, in_memory_store
+):
+    """The Postgres store releases its connection pool here."""
+    closed = []
+
+    class ClosingStore(InMemoryJobStore):
+        async def close(self):
+            closed.append(self)
+
+    async def open_closing_store():
+        return ClosingStore()
+
+    monkeypatch.setattr(app_main, "open_job_store", open_closing_store)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    patch_settings("app.main", workspace_root=tmp_path / "workspace")
+
+    with TestClient(app_main.app):
+        pass
+
+    assert len(closed) == 1
+
+
+def test_each_startup_gets_a_fresh_job_store(
+    monkeypatch, tmp_path, patch_settings, in_memory_store
+):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     patch_settings("app.main", workspace_root=tmp_path / "workspace")
 
     with TestClient(app_main.app) as client:
         client.post("/jobs", json={"text": "t"})
         first_store = app_main.app.state.jobs
-        assert len(first_store.list()) == 1
+        assert len(run_sync(first_store.list())) == 1
 
     with TestClient(app_main.app) as client:
         assert app_main.app.state.jobs is not first_store
         assert client.get("/jobs").json() == []
+
+
+# --------------------------------------------------------------------------
+# open_job_store
+# --------------------------------------------------------------------------
+
+
+async def test_open_job_store_builds_a_postgres_store_from_the_configured_dsn(
+    monkeypatch, patch_settings
+):
+    patch_settings("app.main", database_url="postgresql://u:p@db:5432/agent")
+    seen = {}
+
+    async def fake_create_pool(dsn):
+        seen["dsn"] = dsn
+        return object()
+
+    monkeypatch.setattr(app_main, "create_pool", fake_create_pool)
+
+    store = await app_main.open_job_store()
+
+    assert isinstance(store, PostgresJobStore)
+    assert seen["dsn"] == "postgresql://u:p@db:5432/agent"
 
 
 # --------------------------------------------------------------------------
@@ -122,8 +187,9 @@ def test_launcher_configures_logging_then_starts_uvicorn(monkeypatch):
 
     assert order == [launcher.settings.log_level, "uvicorn"]
     assert captured["target"] == "app.main:app"
-    assert captured["host"] == "127.0.0.1"
-    assert captured["port"] == 8000
+    # Bind address comes from config so the container can listen on 0.0.0.0.
+    assert captured["host"] == launcher.settings.host
+    assert captured["port"] == launcher.settings.port
     assert captured["reload"] is False
     assert captured["log_level"] == launcher.settings.log_level.lower()
     # uvicorn must not install its own handlers; logs go through loguru.
