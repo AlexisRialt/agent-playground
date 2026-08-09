@@ -4,6 +4,8 @@
 
 .idea/
 
+workspace/
+
 # User-specific stuff
 .idea/**/workspace.xml
 .idea/**/tasks.xml
@@ -271,3 +273,6 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+
+# Agent job workspaces (runtime output)
+workspace/

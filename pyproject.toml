@@ -1,7 +1,18 @@
 [project]
 name = "agent-playground"
 version = "0.1.0"
-description = "Add your description here"
+description = "FastAPI server that runs Claude-powered agent jobs with filesystem and Google search tools"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "anthropic>=0.120.2",
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "ruff>=0.16.1",
+    "uvicorn[standard]>=0.52.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
