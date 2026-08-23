@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from app import main as app_main
 from app.api import jobs as jobs_api
+from app.deps import get_job_store
 from app.jobs import InMemoryJobStore, JobStatus
 from tests.conftest import run_sync
 
@@ -251,6 +252,27 @@ def test_the_store_is_per_app_instance(client):
     """State lives on `app.state`, rebuilt by the lifespan on each startup."""
     client.post("/jobs", json={"text": "t"})
     assert len(client.get("/jobs").json()) == 1
+
+
+# --------------------------------------------------------------------------
+# Dependency injection
+# --------------------------------------------------------------------------
+
+
+def test_the_job_store_dependency_is_overridable(client):
+    """Endpoints resolve the store via `Depends(get_job_store)`, not `app.state`
+    directly, so a test can swap it out per-request with `dependency_overrides`
+    rather than reaching into the app's internals."""
+    override_store = InMemoryJobStore()
+    job = run_sync(override_store.create("from the override"))
+
+    app_main.app.dependency_overrides[get_job_store] = lambda: override_store
+    try:
+        body = client.get(f"/jobs/{job.id}").json()
+    finally:
+        app_main.app.dependency_overrides.clear()
+
+    assert body["task"] == "from the override"
 
 
 # --------------------------------------------------------------------------
