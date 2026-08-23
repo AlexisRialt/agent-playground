@@ -20,6 +20,7 @@ ENV_VARS = [
     "DATABASE_URL",
     "HOST",
     "PORT",
+    "CORS_ORIGINS",
 ]
 
 
@@ -42,6 +43,7 @@ def test_defaults(clean_env):
     assert s.database_url == "postgresql://agent:agent@localhost:5432/agent"
     assert s.host == "127.0.0.1"
     assert s.port == 8000
+    assert s.cors_origins == ["http://localhost:3000"]
 
 
 def test_every_value_comes_from_the_environment(clean_env, tmp_path):
@@ -55,6 +57,7 @@ def test_every_value_comes_from_the_environment(clean_env, tmp_path):
     clean_env.setenv("DATABASE_URL", "postgresql://u:p@db:5432/jobs")
     clean_env.setenv("HOST", "0.0.0.0")
     clean_env.setenv("PORT", "9000")
+    clean_env.setenv("CORS_ORIGINS", "http://localhost:3000, http://example.com")
 
     s = Settings.from_env()
 
@@ -68,6 +71,7 @@ def test_every_value_comes_from_the_environment(clean_env, tmp_path):
     assert s.database_url == "postgresql://u:p@db:5432/jobs"
     assert s.host == "0.0.0.0"
     assert s.port == 9000
+    assert s.cors_origins == ["http://localhost:3000", "http://example.com"]
 
 
 def test_workspace_root_is_absolute_even_when_relative(clean_env):

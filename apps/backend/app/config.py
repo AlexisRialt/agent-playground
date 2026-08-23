@@ -25,6 +25,7 @@ class Settings:
     database_url: str  # postgres DSN the job store persists to
     host: str  # bind address; 0.0.0.0 inside a container
     port: int
+    cors_origins: list[str]  # allowed browser origins (the frontend's dev/prod URL)
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -42,6 +43,13 @@ class Settings:
             ),
             host=os.getenv("HOST", "127.0.0.1"),
             port=int(os.getenv("PORT", "8000")),
+            cors_origins=[
+                origin.strip()
+                for origin in os.getenv(
+                    "CORS_ORIGINS", "http://localhost:3000"
+                ).split(",")
+                if origin.strip()
+            ],
         )
 
 

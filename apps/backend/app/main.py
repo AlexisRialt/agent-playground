@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 import httpx
 from anthropic import AsyncAnthropic
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger as log
 
 from app.api import health_router, jobs_router
@@ -61,5 +62,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="agent-playground", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(jobs_router)
 app.include_router(health_router)

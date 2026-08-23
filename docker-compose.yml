@@ -22,14 +22,14 @@ services:
 
   app:
     build:
-      context: .
+      context: ./apps/backend
     depends_on:
       db:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD:-agent}@db:5432/${POSTGRES_DB:-agent}
       # Required — the agent can't run without it. Fails fast if unset.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in your shell or .env}
+      ANTHROPIC_API_KEY: asdf #${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in your shell or .env}
       # Optional: without it, google_search returns its stub response.
       SERPER_API_KEY: ${SERPER_API_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -37,11 +37,27 @@ services:
       AGENT_EFFORT: ${AGENT_EFFORT:-high}
       AGENT_MAX_ITERATIONS: ${AGENT_MAX_ITERATIONS:-20}
       AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-16000}
+      # Browser origin allowed to call this API; the frontend's published URL.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
       # Job sandboxes survive a container restart; jobs themselves live in postgres.
       - workspace:/data/workspace
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./apps/frontend
+      args:
+        # Inlined into the client bundle at build time. The browser calls the
+        # backend directly via its published host port, not through the
+        # compose network, so localhost:8000 is correct even in Docker.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    depends_on:
+      - app
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
     restart: unless-stopped
 
 volumes:
