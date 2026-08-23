@@ -1,77 +1,27 @@
-"""`app.db` — pool construction and the JSON codec registration.
+"""`app.db` — the `jobs` Table definition and the async engine builder.
 
-`asyncpg.create_pool` is stubbed out; these tests are about what the module asks
-of the driver, not about talking to a real server.
+Schema itself is owned by Alembic (see `tests/test_migrations.py`); what's
+worth testing here is that the Table this module hands to the store and to
+Alembic's `env.py` has the right shape, and that `build_engine` wires up the
+engine and probes connectivity the way the app expects.
 """
 
 from __future__ import annotations
 
-import json
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
 from app import db
 
-
-class RecordingConnection:
-    def __init__(self) -> None:
-        self.statements: list[str] = []
-        self.codecs: list[tuple[str, dict[str, Any]]] = []
-
-    async def execute(self, sql: str) -> None:
-        self.statements.append(sql)
-
-    async def set_type_codec(self, name: str, **kwargs: Any) -> None:
-        self.codecs.append((name, kwargs))
-
-
-class RecordingPool:
-    def __init__(self, dsn: str, **kwargs: Any) -> None:
-        self.dsn = dsn
-        self.kwargs = kwargs
-        self.conn = RecordingConnection()
-
-    def acquire(self):
-        conn = self.conn
-
-        class _Acquire:
-            async def __aenter__(self):
-                return conn
-
-            async def __aexit__(self, *exc):
-                return False
-
-        return _Acquire()
-
-
-@pytest.fixture
-def fake_create_pool(monkeypatch):
-    """Replace `asyncpg.create_pool`; returns the list of pools it built."""
-    built: list[RecordingPool] = []
-
-    async def _create_pool(dsn, **kwargs):
-        pool = RecordingPool(dsn, **kwargs)
-        built.append(pool)
-        return pool
-
-    monkeypatch.setattr(db.asyncpg, "create_pool", _create_pool)
-    return built
-
-
 # --------------------------------------------------------------------------
-# SCHEMA
+# jobs Table
 # --------------------------------------------------------------------------
 
 
-def test_schema_is_safe_to_re_run():
-    """Startup applies it on every boot, so it must be idempotent."""
-    assert "CREATE TABLE IF NOT EXISTS jobs" in db.SCHEMA
-    assert "CREATE INDEX IF NOT EXISTS" in db.SCHEMA
-
-
-def test_schema_declares_every_job_column():
-    for column in (
+def test_jobs_table_declares_every_job_column():
+    names = {c.name for c in db.jobs.columns}
+    assert names == {
         "id",
         "status",
         "task",
@@ -81,52 +31,96 @@ def test_schema_declares_every_job_column():
         "error",
         "created_at",
         "updated_at",
-    ):
-        assert column in db.SCHEMA
+    }
 
 
-def test_schema_stores_the_list_columns_as_jsonb():
-    assert "log         JSONB" in db.SCHEMA
-    assert "tool_calls  JSONB" in db.SCHEMA
+def test_id_is_the_primary_key():
+    assert [c.name for c in db.jobs.primary_key.columns] == ["id"]
+
+
+def test_created_at_has_an_index():
+    assert any(ix.name == "jobs_created_at_idx" for ix in db.jobs.indexes)
+
+
+def test_log_and_tool_calls_use_jsonb_on_postgres():
+    from sqlalchemy.dialects import postgresql
+
+    for column in ("log", "tool_calls"):
+        dialect_type = db.jobs.c[column].type.dialect_impl(postgresql.dialect())
+        assert isinstance(dialect_type, postgresql.JSONB)
 
 
 # --------------------------------------------------------------------------
-# create_pool
+# build_engine
 # --------------------------------------------------------------------------
 
 
-async def test_create_pool_passes_the_dsn_and_sizing_through(fake_create_pool):
-    await db.create_pool("postgresql://u:p@host:5432/agent", min_size=2, max_size=7)
-
-    (pool,) = fake_create_pool
-    assert pool.dsn == "postgresql://u:p@host:5432/agent"
-    assert pool.kwargs["min_size"] == 2
-    assert pool.kwargs["max_size"] == 7
+class _FakeResult:
+    def scalar(self) -> int:
+        return 1
 
 
-async def test_create_pool_applies_the_schema(fake_create_pool):
-    pool = await db.create_pool("postgresql://localhost/agent")
-    assert pool.conn.statements == [db.SCHEMA]
+class RecordingConnection:
+    def __init__(self) -> None:
+        self.executed: list[Any] = []
+
+    async def execute(self, statement: Any) -> _FakeResult:
+        self.executed.append(statement)
+        return _FakeResult()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
 
 
-async def test_create_pool_registers_the_codec_on_every_connection(fake_create_pool):
-    await db.create_pool("postgresql://localhost/agent")
+class RecordingEngine:
+    def __init__(self) -> None:
+        self.conn = RecordingConnection()
 
-    (pool,) = fake_create_pool
-    init = pool.kwargs["init"]
-    conn = RecordingConnection()
-    await init(conn)
-
-    (name, options) = conn.codecs[0]
-    assert name == "jsonb"
-    assert options["schema"] == "pg_catalog"
+    def connect(self) -> RecordingConnection:
+        return self.conn
 
 
-async def test_the_jsonb_codec_round_trips_a_tool_call_list():
-    conn = RecordingConnection()
-    await db._register_json_codecs(conn)
-    (_, options) = conn.codecs[0]
+@pytest.fixture
+def fake_create_async_engine(monkeypatch):
+    """Replace `create_async_engine`; returns (dsn, kwargs, engine) it was called with."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+    engine = RecordingEngine()
 
-    payload = [{"tool": "filesystem", "input": {"command": "list"}}]
-    assert options["decoder"](options["encoder"](payload)) == payload
-    assert json.loads(options["encoder"](payload)) == payload
+    def _create_async_engine(dsn: str, **kwargs: Any) -> RecordingEngine:
+        calls.append((dsn, kwargs))
+        return engine
+
+    monkeypatch.setattr(db, "create_async_engine", _create_async_engine)
+    return calls, engine
+
+
+async def test_build_engine_passes_the_dsn_and_sizing_through(fake_create_async_engine):
+    calls, _ = fake_create_async_engine
+
+    await db.build_engine(
+        "postgresql+asyncpg://u:p@host:5432/agent", pool_size=2, max_overflow=7
+    )
+
+    (dsn, kwargs) = calls[0]
+    assert dsn == "postgresql+asyncpg://u:p@host:5432/agent"
+    assert kwargs["pool_size"] == 2
+    assert kwargs["max_overflow"] == 7
+
+
+async def test_build_engine_probes_connectivity(fake_create_async_engine):
+    _, engine = fake_create_async_engine
+
+    await db.build_engine("postgresql+asyncpg://localhost/agent")
+
+    assert len(engine.conn.executed) == 1
+
+
+async def test_build_engine_returns_the_engine(fake_create_async_engine):
+    _, engine = fake_create_async_engine
+
+    result = await db.build_engine("postgresql+asyncpg://localhost/agent")
+
+    assert result is engine

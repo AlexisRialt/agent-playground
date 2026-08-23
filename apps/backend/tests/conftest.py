@@ -14,8 +14,10 @@ from typing import Any
 import httpx
 import pytest
 from anthropic.types import Message
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import settings as real_settings
+from app.db import metadata as db_metadata
 from app.jobs import InMemoryJobStore, Job
 from app.tools.filesystem import Filesystem
 
@@ -138,31 +140,19 @@ async def http_client():
 # --------------------------------------------------------------------------
 
 
-class FakePool:
-    """Stands in for an `asyncpg.Pool`: records SQL, replays canned rows.
+@pytest.fixture
+async def pg_engine():
+    """An in-memory SQLite engine standing in for Postgres.
 
-    Enough to exercise `PostgresJobStore`'s row mapping without a database.
+    `PostgresJobStore` only issues generic SQLAlchemy Core statements (no
+    native `ON CONFLICT`), so it runs unmodified here. Alembic — not this
+    fixture — owns the real, Postgres-only DDL.
     """
-
-    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
-        self.rows = list(rows or [])
-        self.executed: list[tuple[str, tuple[Any, ...]]] = []
-        self.closed = False
-
-    async def execute(self, sql: str, *args: Any) -> None:
-        self.executed.append((sql, args))
-
-    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
-        self.executed.append((sql, args))
-        job_id = args[0]
-        return next((row for row in self.rows if row["id"] == job_id), None)
-
-    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
-        self.executed.append((sql, args))
-        return list(self.rows)
-
-    async def close(self) -> None:
-        self.closed = True
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(db_metadata.create_all)
+    yield engine
+    await engine.dispose()
 
 
 # --------------------------------------------------------------------------

@@ -1,53 +1,50 @@
-"""Postgres connection pool and schema.
+"""The `jobs` table definition and the async engine the job store runs on.
 
-The app keeps one `asyncpg` pool for the process lifetime (built in the lifespan
-handler) and hands it to `PostgresJobStore`. The schema is small enough that we
-create it on startup rather than pulling in a migration tool — if the table shape
-ever changes, that's the point to reach for Alembic.
+Schema is owned by Alembic (`alembic upgrade head`, run as a separate step
+before the app starts — see `alembic/`); this module only describes the
+table for query-building and connects to it. It does not create or alter
+anything.
 """
 
 from __future__ import annotations
 
-import json
-
-import asyncpg
 from loguru import logger as log
+from sqlalchemy import Column, DateTime, Index, MetaData, Table, Text, text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.types import JSON
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS jobs (
-    id          TEXT PRIMARY KEY,
-    status      TEXT        NOT NULL,
-    task        TEXT        NOT NULL,
-    log         JSONB       NOT NULL DEFAULT '[]'::jsonb,
-    tool_calls  JSONB       NOT NULL DEFAULT '[]'::jsonb,
-    result      TEXT,
-    error       TEXT,
-    created_at  TIMESTAMPTZ NOT NULL,
-    updated_at  TIMESTAMPTZ NOT NULL
-);
+metadata = MetaData()
 
-CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs (created_at);
-"""
+# `log`/`tool_calls` are `jsonb` on Postgres (native, indexable) but fall back
+# to SQLAlchemy's generic JSON on any other dialect — this is what lets tests
+# build this same Table against an in-memory SQLite engine.
+_json_type = JSON().with_variant(JSONB(), "postgresql")
+
+jobs = Table(
+    "jobs",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("status", Text, nullable=False),
+    Column("task", Text, nullable=False),
+    Column("log", _json_type, nullable=False, server_default=text("'[]'")),
+    Column("tool_calls", _json_type, nullable=False, server_default=text("'[]'")),
+    Column("result", Text),
+    Column("error", Text),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Index("jobs_created_at_idx", "created_at"),
+)
 
 
-async def _register_json_codecs(conn: asyncpg.Connection) -> None:
-    """Hand `log`/`tool_calls` back as Python lists instead of JSON strings."""
-    await conn.set_type_codec(
-        "jsonb",
-        encoder=json.dumps,
-        decoder=json.loads,
-        schema="pg_catalog",
+async def build_engine(
+    dsn: str, *, pool_size: int = 5, max_overflow: int = 5
+) -> AsyncEngine:
+    """Build the async engine and confirm the database is reachable."""
+    engine = create_async_engine(dsn, pool_size=pool_size, max_overflow=max_overflow)
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+    log.info(
+        "postgres: engine ready (pool_size={} max_overflow={})", pool_size, max_overflow
     )
-
-
-async def create_pool(
-    dsn: str, *, min_size: int = 1, max_size: int = 10
-) -> asyncpg.Pool:
-    """Connect to Postgres and make sure the schema exists."""
-    pool = await asyncpg.create_pool(
-        dsn, min_size=min_size, max_size=max_size, init=_register_json_codecs
-    )
-    async with pool.acquire() as conn:
-        await conn.execute(SCHEMA)
-    log.info("postgres: pool ready (min={} max={}), schema applied", min_size, max_size)
-    return pool
+    return engine

@@ -20,14 +20,27 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  app:
+  migrate:
     build:
       context: ./apps/backend
     depends_on:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD:-agent}@db:5432/${POSTGRES_DB:-agent}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD:-agent}@db:5432/${POSTGRES_DB:-agent}
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  app:
+    build:
+      context: ./apps/backend
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agent}:${POSTGRES_PASSWORD:-agent}@db:5432/${POSTGRES_DB:-agent}
       # Required — the agent can't run without it. Fails fast if unset.
       ANTHROPIC_API_KEY: asdf #${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in your shell or .env}
       # Optional: without it, google_search returns its stub response.

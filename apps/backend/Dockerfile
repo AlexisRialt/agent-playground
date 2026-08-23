@@ -43,6 +43,8 @@ WORKDIR /app
 COPY --from=builder --chown=agent:agent /app/.venv /app/.venv
 COPY --chown=agent:agent main.py ./
 COPY --chown=agent:agent app ./app
+COPY --chown=agent:agent alembic.ini ./
+COPY --chown=agent:agent alembic ./alembic
 
 USER agent
 

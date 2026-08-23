@@ -151,19 +151,19 @@ def test_each_startup_gets_a_fresh_job_store(
 async def test_open_job_store_builds_a_postgres_store_from_the_configured_dsn(
     monkeypatch, patch_settings
 ):
-    patch_settings("app.main", database_url="postgresql://u:p@db:5432/agent")
+    patch_settings("app.main", database_url="postgresql+asyncpg://u:p@db:5432/agent")
     seen = {}
 
-    async def fake_create_pool(dsn):
+    async def fake_build_engine(dsn):
         seen["dsn"] = dsn
         return object()
 
-    monkeypatch.setattr(app_main, "create_pool", fake_create_pool)
+    monkeypatch.setattr(app_main, "build_engine", fake_build_engine)
 
     store = await app_main.open_job_store()
 
     assert isinstance(store, PostgresJobStore)
-    assert seen["dsn"] == "postgresql://u:p@db:5432/agent"
+    assert seen["dsn"] == "postgresql+asyncpg://u:p@db:5432/agent"
 
 
 # --------------------------------------------------------------------------

@@ -1,59 +1,27 @@
-"""`PostgresJobStore` — row mapping and the SQL it issues.
+"""`PostgresJobStore` — behavior against a real (in-memory SQLite) engine.
 
-Driven by `FakePool` rather than a live database: what's worth testing here is
+Driven by the `pg_engine` fixture rather than a live Postgres: the store only
+issues generic SQLAlchemy Core statements (no native `ON CONFLICT`), so the
+exact same code runs unmodified against SQLite. What's worth testing here is
 the translation between a `Job` and its row (JSON columns, `timestamptz` <->
-ISO strings), not that Postgres can execute an UPSERT.
+ISO strings) and the store's upsert/ordering semantics — not that Postgres
+itself can execute a query.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import pytest
 
 from app.jobs import Job, JobStatus, JobStore, PostgresJobStore, ToolCall
-from tests.conftest import FakePool
-
-CREATED = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
-UPDATED = datetime(2026, 1, 1, 12, 5, 30, tzinfo=UTC)
-
-
-def row(**overrides):
-    """A `jobs` row as asyncpg hands it back (datetimes, decoded JSONB)."""
-    return {
-        "id": "job-1",
-        "status": "completed",
-        "task": "summarise the news",
-        "log": ["PLAN: search"],
-        "tool_calls": [
-            {
-                "tool": "google_search",
-                "input": {"query": "news"},
-                "output": "1. a headline",
-                "is_error": False,
-                "at": "2026-01-01T12:01:00+00:00",
-            }
-        ],
-        "result": "here you go",
-        "error": None,
-        "created_at": CREATED,
-        "updated_at": UPDATED,
-    } | overrides
-
-
-@pytest.fixture
-def pool():
-    return FakePool()
-
-
-@pytest.fixture
-def pg(pool):
-    return PostgresJobStore(pool)
-
 
 # --------------------------------------------------------------------------
 # Interface
 # --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def pg(pg_engine):
+    return PostgresJobStore(pg_engine)
 
 
 def test_it_is_a_job_store(pg):
@@ -65,19 +33,17 @@ def test_it_is_a_job_store(pg):
 # --------------------------------------------------------------------------
 
 
-async def test_create_writes_a_pending_job_and_returns_it(pg, pool):
+async def test_create_writes_a_pending_job_and_returns_it(pg):
     job = await pg.create("write a haiku")
 
     assert job.task == "write a haiku"
     assert job.status is JobStatus.PENDING
-    (sql, args) = pool.executed[0]
-    assert sql.strip().startswith("INSERT INTO jobs")
-    assert args[0] == job.id
-    assert args[1] == "pending"
-    assert args[2] == "write a haiku"
+    stored = await pg.get(job.id)
+    assert stored.task == "write a haiku"
+    assert stored.status is JobStatus.PENDING
 
 
-async def test_save_sends_every_column_in_order(pg, pool):
+async def test_save_persists_every_field(pg):
     job = Job(task="t", id="job-1")
     job.add_log("PLAN")
     job.add_tool_call("filesystem", {"command": "list"}, "empty", False)
@@ -86,41 +52,27 @@ async def test_save_sends_every_column_in_order(pg, pool):
 
     await pg.save(job)
 
-    (_, args) = pool.executed[-1]
-    assert args[0] == "job-1"
-    assert args[1] == "failed"
-    assert args[3] == ["PLAN"]
-    assert args[4] == [job.tool_calls[0].to_dict()]
-    assert args[5] is None  # result
-    assert args[6] == "RuntimeError: boom"
+    stored = await pg.get("job-1")
+    assert stored.status is JobStatus.FAILED
+    assert stored.log == ["PLAN"]
+    assert stored.tool_calls[0].to_dict() == job.tool_calls[0].to_dict()
+    assert stored.result is None
+    assert stored.error == "RuntimeError: boom"
 
 
-async def test_save_converts_timestamps_to_datetimes(pg, pool):
-    """The columns are `timestamptz`; the dataclass carries ISO strings."""
+async def test_save_upserts_so_a_job_can_be_written_repeatedly(pg):
     job = Job(task="t")
 
     await pg.save(job)
+    created_at = (await pg.get(job.id)).created_at
 
-    (_, args) = pool.executed[-1]
-    created, updated = args[7], args[8]
-    assert isinstance(created, datetime)
-    assert created.tzinfo is not None
-    assert created.isoformat() == job.created_at
-    assert updated.isoformat() == job.updated_at
-
-
-async def test_save_upserts_so_a_job_can_be_written_repeatedly(pg, pool):
-    job = Job(task="t")
-
-    await pg.save(job)
     job.status = JobStatus.RUNNING
     await pg.save(job)
 
-    assert len(pool.executed) == 2
-    sql = pool.executed[-1][0]
-    assert "ON CONFLICT (id) DO UPDATE" in sql
+    reloaded = await pg.get(job.id)
+    assert reloaded.status is JobStatus.RUNNING
     # created_at is set once, at insert; a re-save must not move it.
-    assert "created_at = EXCLUDED" not in sql
+    assert reloaded.created_at == created_at
 
 
 # --------------------------------------------------------------------------
@@ -128,42 +80,51 @@ async def test_save_upserts_so_a_job_can_be_written_repeatedly(pg, pool):
 # --------------------------------------------------------------------------
 
 
-async def test_get_rebuilds_the_job_from_its_row(pool):
-    pool.rows = [row()]
-    job = await PostgresJobStore(pool).get("job-1")
+async def test_get_rebuilds_the_job_from_its_row(pg):
+    job = Job(id="job-1", task="summarise the news", result="here you go")
+    job.status = JobStatus.COMPLETED
+    job.add_log("PLAN: search")
+    await pg.save(job)
 
-    assert job.id == "job-1"
-    assert job.status is JobStatus.COMPLETED
-    assert job.task == "summarise the news"
-    assert job.log == ["PLAN: search"]
-    assert job.result == "here you go"
-    assert job.error is None
+    loaded = await pg.get("job-1")
+
+    assert loaded.id == "job-1"
+    assert loaded.status is JobStatus.COMPLETED
+    assert loaded.task == "summarise the news"
+    assert loaded.log == ["PLAN: search"]
+    assert loaded.result == "here you go"
+    assert loaded.error is None
 
 
-async def test_get_restores_tool_calls_as_objects(pool):
-    pool.rows = [row()]
-    job = await PostgresJobStore(pool).get("job-1")
+async def test_get_restores_tool_calls_as_objects(pg):
+    job = Job(id="job-1", task="t")
+    job.add_tool_call("google_search", {"query": "news"}, "1. a headline", False)
+    await pg.save(job)
 
-    (call,) = job.tool_calls
+    loaded = await pg.get("job-1")
+
+    (call,) = loaded.tool_calls
     assert isinstance(call, ToolCall)
     assert call.tool == "google_search"
     assert call.input == {"query": "news"}
     assert call.is_error is False
 
 
-async def test_get_renders_timestamps_back_as_iso_strings(pool):
-    pool.rows = [row()]
-    job = await PostgresJobStore(pool).get("job-1")
+async def test_get_renders_timestamps_back_as_iso_strings(pg):
+    job = Job(id="job-1", task="t")
+    await pg.save(job)
 
-    assert job.created_at == "2026-01-01T12:00:00+00:00"
-    assert job.updated_at == "2026-01-01T12:05:30+00:00"
+    loaded = await pg.get("job-1")
+
+    assert loaded.created_at == job.created_at
+    assert loaded.updated_at == job.updated_at
 
 
 async def test_get_unknown_id_returns_none(pg):
     assert await pg.get("nope") is None
 
 
-async def test_a_saved_job_round_trips_through_a_row(pg, pool):
+async def test_a_saved_job_round_trips_through_a_row(pg):
     """save() -> row -> get() must reproduce the same API payload."""
     original = Job(task="round trip")
     original.add_log("PLAN")
@@ -172,19 +133,6 @@ async def test_a_saved_job_round_trips_through_a_row(pg, pool):
     original.result = "done"
 
     await pg.save(original)
-    (_, args) = pool.executed[-1]
-    columns = [
-        "id",
-        "status",
-        "task",
-        "log",
-        "tool_calls",
-        "result",
-        "error",
-        "created_at",
-        "updated_at",
-    ]
-    pool.rows = [dict(zip(columns, args, strict=True))]
 
     assert (await pg.get(original.id)).to_dict() == original.to_dict()
 
@@ -194,14 +142,17 @@ async def test_a_saved_job_round_trips_through_a_row(pg, pool):
 # --------------------------------------------------------------------------
 
 
-async def test_list_returns_every_row_oldest_first(pool):
-    pool.rows = [row(id="a"), row(id="b")]
+async def test_list_returns_every_row_oldest_first(pg):
+    older = Job(id="a", task="t")
+    older.created_at = "2026-01-01T00:00:00+00:00"
+    newer = Job(id="b", task="t")
+    newer.created_at = "2026-01-02T00:00:00+00:00"
+    await pg.save(older)
+    await pg.save(newer)
 
-    jobs = await PostgresJobStore(pool).list()
+    jobs = await pg.list()
 
     assert [j.id for j in jobs] == ["a", "b"]
-    sql = pool.executed[-1][0]
-    assert "ORDER BY created_at" in sql
 
 
 async def test_list_is_empty_when_the_table_is(pg):
@@ -213,6 +164,16 @@ async def test_list_is_empty_when_the_table_is(pg):
 # --------------------------------------------------------------------------
 
 
-async def test_close_closes_the_pool(pg, pool):
-    await pg.close()
-    assert pool.closed
+async def test_close_disposes_the_engine():
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    engine = FakeEngine()
+
+    await PostgresJobStore(engine).close()
+
+    assert engine.disposed

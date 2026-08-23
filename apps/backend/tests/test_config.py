@@ -40,7 +40,7 @@ def test_defaults(clean_env):
     assert s.workspace_root == Path("workspace").resolve()
     assert s.serper_api_key is None
     assert s.log_level == "INFO"
-    assert s.database_url == "postgresql://agent:agent@localhost:5432/agent"
+    assert s.database_url == "postgresql+asyncpg://agent:agent@localhost:5432/agent"
     assert s.host == "127.0.0.1"
     assert s.port == 8000
     assert s.cors_origins == ["http://localhost:3000"]

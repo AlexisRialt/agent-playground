@@ -17,7 +17,7 @@ from loguru import logger as log
 
 from app.api import health_router, jobs_router
 from app.config import settings
-from app.db import create_pool
+from app.db import build_engine
 from app.jobs import JobStore, PostgresJobStore
 from app.logs import setup_logging
 
@@ -30,7 +30,7 @@ async def open_job_store() -> JobStore:
     Split out of the lifespan so the tests can swap in `InMemoryJobStore` and
     stay off the network.
     """
-    return PostgresJobStore(await create_pool(settings.database_url))
+    return PostgresJobStore(await build_engine(settings.database_url))
 
 
 @asynccontextmanager
