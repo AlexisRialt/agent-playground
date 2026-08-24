@@ -27,7 +27,8 @@ together.
 Root `apps/backend/main.py` is just the uvicorn launcher; the app lives under `apps/backend/app/`:
 
 - `app/main.py` — app wiring only: the lifespan handler (shared `AsyncAnthropic` + `httpx` clients and the `JobStore` on `app.state`), CORS middleware (allows the frontend's origin, `CORS_ORIGINS`), and `include_router` calls. No endpoints, no job logic. `open_job_store()` is split out of the lifespan as the one seam the tests patch to stay off Postgres.
-- `app/api/` — the HTTP endpoints, one `APIRouter` per resource: `jobs.py` (`POST /jobs`, `GET /jobs/{id}`, `GET /jobs`, plus the request/response models) and `health.py` (`GET /healthz`). Handlers reach shared state via `request.app.state`.
+- `app/api/` — the HTTP endpoints, one `APIRouter` per resource: `jobs.py` (`POST /jobs`, `GET /jobs/{id}`, `GET /jobs`, plus the request/response models) and `health.py` (`GET /healthz`). Handlers declare what they need via the `Depends()` aliases in `app/deps.py` (`JobStoreDep`, `AnthropicClient`, `HttpClient`, `TaskRegistry`) rather than reaching into `request.app.state` themselves.
+- `app/deps.py` — the FastAPI dependency providers: thin functions of `request.app.state` (still populated by the lifespan handler), exposed both as plain callables (`get_job_store`, `get_anthropic_client`, `get_http_client`, `get_task_registry`) and as `Annotated[..., Depends(...)]` aliases for endpoint signatures. This is the seam tests use to swap a dependency per-request via `app.dependency_overrides`, instead of monkeypatching `app.state` or a handler module.
 - `app/runner.py` — `execute_job()`: owns a job's lifecycle (sandbox setup → `run_agent` → record result/error) **and its writes**. It saves the job when it starts, after every agent iteration (via the `on_progress` callback it hands `run_agent`), and when it finishes — so a poll mid-run sees live progress. `POST /jobs` fires it as a detached `asyncio` task, tracked in `app.state.tasks` so it isn't GC'd.
 - `app/agent.py` — the agent itself: a **manual** Claude tool-use loop (not the SDK tool runner, so each plan step and tool call is recorded into the `Job`). Uses `claude-opus-4-8` with adaptive thinking. The system prompt tells the agent to write a plan first, then act. Takes an optional `on_progress` coroutine, awaited once per non-final iteration.
 - `app/tools/filesystem.py` — one tool (`list`/`read`/`write`) confined to a per-job `workspace/<job_id>/` sandbox; every path is resolved and checked to stay inside the root.
@@ -97,7 +98,9 @@ Run from `apps/backend/`:
 `tests/` mirrors `app/` one file per module (`test_agent.py`, `test_filesystem.py`,
 `test_search.py`, `test_jobs.py` for the job records + `InMemoryJobStore`,
 `test_postgres_store.py`, `test_db.py`, `test_migrations.py`, `test_runner.py`,
-`test_api.py` for both routers, `test_main.py` for app wiring + the launcher). Config
+`test_deps.py` for the dependency providers, `test_api.py` for both routers
+(incl. overriding a dependency via `app.dependency_overrides`), `test_main.py`
+for app wiring + the launcher). Config
 lives under `[tool.pytest.ini_options]` in `apps/backend/pyproject.toml`:
 `asyncio_mode = "auto"`, so async tests are plain `async def` with no marker.
 
